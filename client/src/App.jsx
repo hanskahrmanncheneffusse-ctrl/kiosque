@@ -1,30 +1,30 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
+import { ref, onValue, push, remove } from 'firebase/database';
+import { db } from './firebase.js';
+import { ITEMS, TOTAL } from './data.js';
 import LineItemRow from './components/LineItemRow.jsx';
 import Summary from './components/Summary.jsx';
 import Onboarding from './components/Onboarding.jsx';
 
 export default function App() {
-  const [state, setState] = useState(null);
+  const [claims, setClaims] = useState([]);
   const [name, setName] = useState(() => localStorage.getItem('kiosque_name') || '');
   const [nameInput, setNameInput] = useState(() => localStorage.getItem('kiosque_name') || '');
   const [showOnboarding, setShowOnboarding] = useState(
     () => !localStorage.getItem('kiosque_onboarded')
   );
 
-  const fetchState = useCallback(async () => {
-    try {
-      const res = await fetch('/api/state');
-      setState(await res.json());
-    } catch {
-      // server not ready yet, retry on next tick
-    }
-  }, []);
-
   useEffect(() => {
-    fetchState();
-    const id = setInterval(fetchState, 2000);
-    return () => clearInterval(id);
-  }, [fetchState]);
+    const claimsRef = ref(db, 'claims');
+    const unsubscribe = onValue(claimsRef, (snapshot) => {
+      const data = snapshot.val();
+      const list = data
+        ? Object.entries(data).map(([id, val]) => ({ id, ...val }))
+        : [];
+      setClaims(list);
+    });
+    return unsubscribe;
+  }, []);
 
   function saveName(e) {
     e.preventDefault();
@@ -36,28 +36,29 @@ export default function App() {
 
   async function handleClaim(itemId, percentage) {
     if (!name) return { error: 'Set your name first.' };
-    const res = await fetch('/api/claims', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ person: name, itemId, percentage }),
-    });
-    const data = await res.json();
-    if (res.ok) { setState(data); return null; }
-    return data;
+
+    const item = ITEMS.find(i => i.id === itemId);
+    if (!item) return { error: 'Invalid item.' };
+
+    const alreadyClaimed = claims
+      .filter(c => c.itemId === itemId)
+      .reduce((s, c) => s + c.percentage, 0);
+
+    if (alreadyClaimed + percentage > 100) {
+      return { error: `Only ${(100 - alreadyClaimed).toFixed(0)}% remaining for this item.` };
+    }
+
+    await push(ref(db, 'claims'), { person: name, itemId, percentage });
+    return null;
   }
 
   async function handleDelete(claimId) {
-    const res = await fetch(`/api/claims/${claimId}`, { method: 'DELETE' });
-    if (res.ok) setState(await res.json());
+    await remove(ref(db, `claims/${claimId}`));
   }
 
   function dismissOnboarding() {
     localStorage.setItem('kiosque_onboarded', '1');
     setShowOnboarding(false);
-  }
-
-  if (!state) {
-    return <div className="loading">Connecting to server…</div>;
   }
 
   return (
@@ -71,7 +72,7 @@ export default function App() {
         </div>
         <div className="header-right">
           <button className="btn-help" onClick={() => setShowOnboarding(true)} aria-label="Help">?</button>
-          <div className="header-total">€{state.total.toFixed(2)}</div>
+          <div className="header-total">€{TOTAL.toFixed(2)}</div>
         </div>
       </header>
 
@@ -98,11 +99,11 @@ export default function App() {
       </div>
 
       <main id="items-list">
-        {state.items.map(item => (
+        {ITEMS.map(item => (
           <LineItemRow
             key={item.id}
             item={item}
-            claims={state.claims}
+            claims={claims}
             myName={name}
             onClaim={handleClaim}
             onDelete={handleDelete}
@@ -110,11 +111,7 @@ export default function App() {
         ))}
       </main>
 
-      <Summary
-        items={state.items}
-        claims={state.claims}
-        total={state.total}
-      />
+      <Summary items={ITEMS} claims={claims} total={TOTAL} />
     </div>
   );
 }
